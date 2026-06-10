@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+duckdb
+openpyxl
+matplotlib
+plotly
+langchain
+langchain-google-genai
+python-dotenv
+fpdf
