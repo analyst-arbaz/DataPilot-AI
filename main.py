@@ -17,6 +17,7 @@ from agents.sql_agent import run_sql, get_table_names
 from agents.python_agent import execute_python
 from agents.business_agent import business_analysis
 from agents.report_agent import create_pdf
+from agents.analysis_report_agent import create_analysis_pdf
 from dashboards.dashboard import show_dashboard
 
 
@@ -38,7 +39,7 @@ st.markdown("""
     ⚡ DataPilot AI
   </h1>
   <p style="font-size:1.05rem;color:#888;margin:0.3rem 0 0 0;">
-    Your Intelligent Data Co-Pilot — From Raw Data to Real Decisions
+    Intelligent Multi-Agent Data Analysis Platform — From Raw Data to Real Decisions
   </p>
 </div>
 
@@ -51,7 +52,7 @@ st.markdown("""
 ">
   <h3 style="color:#ffffff;margin:0 0 0.5rem 0;font-size:1.1rem;">🎯 What is DataPilot AI?</h3>
   <p style="color:#c0cfe0;margin:0;font-size:0.95rem;line-height:1.7;">
-    DataPilot AI is an end-to-end intelligent data analysis platform powered by <strong style="color:#00A4EF;">GitHub Models (GPT-4o mini)</strong>.
+    DataPilot AI is an end-to-end intelligent data analysis platform powered by <strong style="color:#00A4EF;">Azure AI Foundry (Foundry IQ)</strong>.
     Simply upload any CSV or Excel file and the system automatically cleans your data, profiles it,
     runs SQL analysis, generates visualizations, and delivers business insights — all in seconds.
     Built for <strong style="color:#FFB900;">Microsoft Agents League Hackathon 2026</strong>.
@@ -94,6 +95,9 @@ defaults = {
     "business_report": None,
     "analyzed_files":  set(),
     "chat_history":    [],
+    "analysis_log":    [],
+    "cleaning_summary": None,
+    "profile_df":      None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -122,6 +126,8 @@ def run_auto_analysis(df, file_name, tables_info):
         with st.spinner("Cleaning..."):
             cleaned_df, summary = clean_dataset(df)
         st.session_state.datasets[file_name] = cleaned_df
+        st.session_state.cleaning_summary = summary
+        df = cleaned_df  # Update df reference for all subsequent steps
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Original Rows",     summary["original_rows"])
@@ -130,7 +136,28 @@ def run_auto_analysis(df, file_name, tables_info):
         c4.metric("Nulls Fixed",        summary["nulls_fixed"])
 
         st.success("Dataset cleaned.")
-        st.dataframe(cleaned_df.head(), width="stretch")
+        st.session_state.analysis_log.append({
+            "step": "🧹 Step 1 — Data Cleaning",
+            "library": "Pandas",
+            "code": """import pandas as pd
+
+# Remove duplicates
+df.drop_duplicates(inplace=True)
+
+# Fill nulls — text columns: mode, numeric: median, datetime: forward fill
+for col in df.columns:
+    if df[col].dtype == "object":
+        df[col] = df[col].fillna(df[col].mode()[0])
+    elif pd.api.types.is_numeric_dtype(df[col]):
+        df[col] = df[col].fillna(df[col].median())
+    elif pd.api.types.is_datetime64_any_dtype(df[col]):
+        df[col] = df[col].ffill()
+
+# Strip whitespace from text columns
+for col in df.select_dtypes(include=["object"]).columns:
+    df[col] = df[col].str.strip()"""
+        })
+        st.dataframe(cleaned_df.head(), width='stretch')
 
     bar.progress(20, text="Step 2/5 — Profiling...")
     df = cleaned_df
@@ -139,7 +166,23 @@ def run_auto_analysis(df, file_name, tables_info):
     with st.expander("📋 Step 2 — Dataset Profile", expanded=True):
         with st.spinner("Profiling..."):
             profile = profile_dataset(df)
-        st.dataframe(profile, width="stretch")
+        st.session_state.profile_df = profile
+        st.dataframe(profile, width='stretch')
+        st.session_state.analysis_log.append({
+            "step": "📋 Step 2 — Dataset Profiling",
+            "library": "Pandas",
+            "code": """import pandas as pd
+
+# Profile each column
+profile = pd.DataFrame({
+    "Column":        df.columns.tolist(),
+    "Data Type":     df.dtypes.astype(str).tolist(),
+    "Missing Count": df.isnull().sum().tolist(),
+    "Missing %":     ((df.isnull().sum() / len(df)) * 100).round(2).astype(str).add(" %").tolist(),
+    "Unique Values": df.nunique().tolist(),
+    "Sample Value":  [str(df[c].dropna().iloc[0]) if len(df[c].dropna()) > 0 else "N/A" for c in df.columns],
+})"""
+        })
 
     bar.progress(40, text="Step 3/5 — SQL...")
 
@@ -168,11 +211,23 @@ def run_auto_analysis(df, file_name, tables_info):
                 f'FROM {tname} GROUP BY "{gc}" ORDER BY 2 DESC LIMIT 10'
             )
 
+        # Log SQL queries
+        sql_log = "\n\n".join([f"-- {lbl}\n{qry}" for lbl, qry in queries.items()])
+        st.session_state.analysis_log.append({
+            "step": "🗄️ Step 3 — SQL Analysis",
+            "library": "DuckDB",
+            "code": sql_log
+        })
+
+        # Use current cleaned df directly — ensures correct data
+        sql_datasets = {file_name: df}
+        sql_datasets.update({k: v for k, v in st.session_state.datasets.items() if k != file_name})
+
         for label, q in queries.items():
             st.markdown(f"**{label}**")
             st.code(q, language="sql")
             try:
-                st.dataframe(run_sql(q, st.session_state.datasets), width="stretch")
+                st.dataframe(run_sql(q, sql_datasets), width='stretch')
             except Exception as e:
                 st.error(f"SQL error: {e}")
             st.markdown("")
@@ -222,7 +277,7 @@ Rules:
                     st.code(code, language="python")
 
                     scope = {"df": df, "pd": pd, "plt": plt, "sns": sns, "st": st}
-                    exec(code, {}, scope)
+                    exec(code, {"__builtins__": __builtins__}, scope)
                     plt.close("all")
 
                 except Exception as e:
@@ -253,7 +308,6 @@ Rules:
                             data=f.read(),
                             file_name="business_report.pdf",
                             mime="application/pdf",
-                            width="stretch",
                         )
                 except Exception as e:
                     st.error(f"PDF error: {e}")
@@ -329,6 +383,30 @@ if st.session_state.datasets:
             pass
 
 
+    # Analysis Log in sidebar
+    if st.session_state.analysis_log:
+        st.sidebar.markdown("---")
+        if st.sidebar.button("📋 View Analysis Log"):
+            st.session_state["show_log"] = not st.session_state.get("show_log", False)
+
+        if st.session_state.get("show_log", False):
+            # Build downloadable text
+            log_text = "DataPilot AI — Analysis Log\n"
+            log_text += "=" * 50 + "\n\n"
+            for entry in st.session_state.analysis_log:
+                log_text += f"{entry['step']}\n"
+                log_text += f"Library: {entry['library']}\n"
+                log_text += "-" * 40 + "\n"
+                log_text += entry["code"] + "\n\n"
+
+            st.sidebar.download_button(
+                label="⬇️ Download Analysis Log (.txt)",
+                data=log_text,
+                file_name="datapilot_analysis_log.txt",
+                mime="text/plain",
+            )
+
+
 # Auto-analysis trigger
 if st.session_state.datasets:
     for fname, df in st.session_state.datasets.items():
@@ -339,6 +417,90 @@ if st.session_state.datasets:
     if current_df is not None:
         st.markdown("---")
         show_dashboard(current_df)
+
+
+    # Full Analysis Log — main area
+    if st.session_state.analysis_log:
+        st.markdown("---")
+        with st.expander("📋 Analysis Code & Query Log — Download PDF", expanded=False):
+            st.markdown("All libraries, code and queries executed during this analysis session:")
+
+            col_dl1, col_dl2 = st.columns(2)
+
+            # TXT Download
+            log_text = "DataPilot AI — Analysis Log\n"
+            log_text += "=" * 50 + "\n\n"
+            log_text += "LIBRARIES USED:\n"
+            log_text += "  - Pandas     : Data cleaning, profiling\n"
+            log_text += "  - NumPy      : Numerical computations\n"
+            log_text += "  - DuckDB     : SQL query execution\n"
+            log_text += "  - Matplotlib : Chart generation\n"
+            log_text += "  - Seaborn    : Statistical visualizations\n"
+            log_text += "  - LangChain  : LLM orchestration\n"
+            log_text += "  - Azure AI Foundry (Foundry IQ) : AI inference\n"
+            log_text += "=" * 50 + "\n\n"
+            for entry in st.session_state.analysis_log:
+                log_text += f"{entry['step']}\n"
+                log_text += f"Library: {entry['library']}\n"
+                log_text += "-" * 40 + "\n"
+                log_text += entry["code"] + "\n\n"
+
+            with col_dl1:
+                st.download_button(
+                    label="⬇️ Download as TXT",
+                    data=log_text,
+                    file_name="datapilot_analysis_log.txt",
+                    mime="text/plain",
+                    key="main_log_download_txt",
+                )
+
+            # PDF Download
+            with col_dl2:
+                try:
+                    pdf_path = create_analysis_pdf(
+                        analysis_log=st.session_state.analysis_log,
+                        dataset_name=selected_dataset or "Dataset",
+                        cleaning_summary=st.session_state.get("cleaning_summary"),
+                        profile_df=st.session_state.get("profile_df"),
+                    )
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            label="⬇️ Download as PDF",
+                            data=f.read(),
+                            file_name="datapilot_analysis_report.pdf",
+                            mime="application/pdf",
+                            key="main_log_download_pdf",
+                        )
+                except Exception as e:
+                    st.error(f"PDF generation error: {e}")
+
+            st.markdown("---")
+
+            # Libraries overview
+            st.markdown("### 📦 Libraries Used in This Analysis")
+            lib_cols = st.columns(4)
+            libs = [
+                ("Pandas", "Cleaning & Profiling"),
+                ("NumPy", "Numerical Ops"),
+                ("DuckDB", "SQL Queries"),
+                ("Matplotlib", "Charts"),
+                ("Seaborn", "Visualizations"),
+                ("LangChain", "LLM Calls"),
+                ("Azure AI Foundry", "Foundry IQ"),
+                ("ReportLab", "PDF Export"),
+            ]
+            for i, (lib, desc) in enumerate(libs):
+                lib_cols[i % 4].markdown(f"**{lib}**  \n`{desc}`")
+
+            st.markdown("---")
+
+            for i, entry in enumerate(st.session_state.analysis_log):
+                st.markdown(f"### {entry['step']}")
+                st.caption(f"📦 Library used: **{entry['library']}**")
+                lang = "sql" if "SQL" in entry["step"] else "python"
+                st.code(entry["code"], language=lang)
+                if i < len(st.session_state.analysis_log) - 1:
+                    st.markdown("---")
 
 
 # Chat
@@ -372,12 +534,12 @@ if st.session_state.datasets:
                     f"- Rows remaining: **{summary['cleaned_rows']}**"
                 )
                 st.markdown(reply)
-                st.dataframe(cleaned_df.head(), width="stretch")
+                st.dataframe(cleaned_df.head(), width='stretch')
                 st.session_state.chat_history.append({"role": "assistant", "content": reply})
 
             elif agent == "profiling":
                 profile = profile_dataset(current_df)
-                st.dataframe(profile, width="stretch")
+                st.dataframe(profile, width='stretch')
                 st.session_state.chat_history.append({"role": "assistant", "content": "Profile shown above."})
 
             elif agent == "sql":
@@ -396,7 +558,7 @@ Return only the SQL query — no explanation, no markdown.
                 st.code(sql_query, language="sql")
                 try:
                     result = run_sql(sql_query, st.session_state.datasets)
-                    st.dataframe(result, width="stretch")
+                    st.dataframe(result, width='stretch')
                     st.session_state.chat_history.append({
                         "role": "assistant",
                         "content": f"```sql\n{sql_query}\n```",
@@ -434,11 +596,11 @@ Rules:
                         "plt": plt, "sns": sns, "st": st, "output_df": None,
                     }
                     scope.update(st.session_state.datasets)
-                    exec(code, {}, scope)
+                    exec(code, {"__builtins__": __builtins__}, scope)
                     plt.close("all")
 
                     if scope.get("output_df") is not None:
-                        st.dataframe(scope["output_df"], width="stretch")
+                        st.dataframe(scope["output_df"], width='stretch')
 
                     st.session_state.chat_history.append({
                         "role": "assistant",
@@ -467,7 +629,6 @@ Rules:
                             data=f.read(),
                             file_name="business_report.pdf",
                             mime="application/pdf",
-                            width="stretch",
                         )
                 except Exception as e:
                     st.error(f"PDF error: {e}")
@@ -508,7 +669,7 @@ st.markdown("""
   <p style="color:#888;font-size:0.8rem;margin:0;">
     ⚡ <strong style="color:#00A4EF;">DataPilot AI</strong> &nbsp;|&nbsp;
     Built for <strong style="color:#FFB900;">Microsoft Agents League Hackathon 2026</strong> &nbsp;|&nbsp;
-    Powered by <strong style="color:#7FBA00;">GitHub Models</strong>
+    Powered by <strong style="color:#7FBA00;">Azure AI Foundry</strong>
   </p>
 </div>
 """, unsafe_allow_html=True)

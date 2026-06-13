@@ -48,5 +48,5 @@ def show_dashboard(df):
             corr = df[num_cols].corr().round(2)
             st.dataframe(
                 corr.style.background_gradient(cmap="RdYlGn", axis=None),
-                width="stretch"
+                width='stretch'
             )
