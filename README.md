@@ -161,7 +161,7 @@ DataPilot-AI/
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/YOUR_USERNAME/DataPilot-AI.git
+git clone https://github.com/analyst-arbaz/DataPilot-AI.git
 cd DataPilot-AI
 ```
 
